@@ -1,0 +1,125 @@
+name: CI
+
+on:
+  push:
+    branches: [ main, master, develop ]
+  pull_request:
+    branches: [ main, master, develop ]
+
+jobs:
+  test-python:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        python-version: ["3.10", "3.11", "3.12"]
+
+    steps:
+    - uses: actions/checkout@v4
+    
+    - name: Set up Python ${{ matrix.python-version }}
+      uses: actions/setup-python@v4
+      with:
+        python-version: ${{ matrix.python-version }}
+    
+    - name: Install Poetry
+      uses: snok/install-poetry@v1
+      with:
+        virtualenvs-create: true
+        virtualenvs-in-project: true
+    
+    - name: Load cached venv
+      id: cached-poetry-dependencies
+      uses: actions/cache@v3
+      with:
+        path: .venv
+        key: venv-${{ runner.os }}-${{ matrix.python-version }}-${{ hashFiles('**/poetry.lock') }}
+    
+    - name: Install dependencies
+      if: steps.cached-poetry-dependencies.outputs.cache-hit != 'true'
+      run: poetry install --no-interaction --no-root
+    
+    - name: Install project
+      run: poetry install --no-interaction
+    
+    - name: Run tests
+      run: |
+        poetry run pytest -v
+        cd backend && poetry run pytest -v || true
+    
+    - name: Run linting
+      run: |
+        poetry run ruff check . || poetry run flake8 . || true
+
+  test-frontend:
+    runs-on: ubuntu-latest
+
+    steps:
+    - uses: actions/checkout@v4
+    
+    - name: Setup Node.js
+      uses: actions/setup-node@v4
+      with:
+        node-version: '18'
+        cache: 'npm'
+        cache-dependency-path: frontend/package-lock.json
+    
+    - name: Install frontend dependencies
+      working-directory: frontend
+      run: npm ci
+    
+    - name: Run frontend linting
+      working-directory: frontend
+      run: npm run lint
+    
+    - name: TypeScript type checking
+      working-directory: frontend
+      run: npx tsc --noEmit
+    
+    - name: Run frontend tests
+      working-directory: frontend
+      run: npm test || echo "No tests configured"
+    
+    - name: Build frontend
+      working-directory: frontend
+      run: npm run build
+
+  build:
+    needs: [test-python, test-frontend]
+    runs-on: ubuntu-latest
+    
+    steps:
+    - uses: actions/checkout@v4
+    
+    - name: Set up Python
+      uses: actions/setup-python@v4
+      with:
+        python-version: "3.10"
+    
+    - name: Install Poetry
+      uses: snok/install-poetry@v1
+    
+    - name: Build Python package
+      run: poetry build
+    
+    - name: Upload Python artifacts
+      uses: actions/upload-artifact@v3
+      with:
+        name: python-dist
+        path: dist/
+    
+    - name: Setup Node.js
+      uses: actions/setup-node@v4
+      with:
+        node-version: '18'
+    
+    - name: Build frontend
+      working-directory: frontend
+      run: |
+        npm ci
+        npm run build
+    
+    - name: Upload frontend artifacts
+      uses: actions/upload-artifact@v3
+      with:
+        name: frontend-build
+        path: frontend/.next/

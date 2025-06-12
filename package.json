@@ -1,0 +1,62 @@
+{
+  "name": "bwr-tools-workspace",
+  "version": "0.1.0",
+  "private": true,
+  "description": "BWR-Tools monorepo workspace",
+  "scripts": {
+    "install": "./scripts/install.sh",
+    "dev": "./scripts/dev.sh",
+    "dev:full": "./scripts/dev.sh --with-streamlit",
+    "dev:backend": "cd backend && uvicorn main:app --reload --host 0.0.0.0 --port 8000",
+    "dev:frontend": "cd frontend && npm run dev",
+    "dev:streamlit": "streamlit run app.py",
+    "test": "./scripts/test.sh",
+    "test:python": "poetry run pytest -v",
+    "test:backend": "cd backend && pytest -v",
+    "test:frontend": "cd frontend && npm test",
+    "build": "./scripts/build.sh",
+    "build:python": "poetry build",
+    "build:frontend": "cd frontend && npm run build",
+    "lint": "npm run lint:python && npm run lint:frontend",
+    "lint:python": "cd src && (ruff check . || flake8 . || echo 'No Python linter found')",
+    "lint:frontend": "cd frontend && npm run lint",
+    "format": "npm run format:python && npm run format:frontend",
+    "format:python": "cd src && (ruff format . || black . || echo 'No Python formatter found')",
+    "format:frontend": "cd frontend && npx prettier --write 'src/**/*.{ts,tsx,js,jsx}'",
+    "clean": "rm -rf dist/ build/ *.egg-info frontend/.next frontend/out && find . -type d -name '__pycache__' -exec rm -rf {} + 2>/dev/null || true",
+    "deploy": "./scripts/deploy.sh",
+    "deploy:python": "./scripts/deploy.sh --python",
+    "deploy:frontend": "./scripts/deploy.sh --frontend",
+    "deploy:all": "./scripts/deploy.sh --all",
+    "check": "npm run lint && npm run test",
+    "preinstall": "command -v poetry >/dev/null 2>&1 || { echo 'Poetry is required but not installed. Visit https://python-poetry.org/docs/#installation'; exit 1; }",
+    "postinstall": "echo '✓ Installation complete! Run npm run dev to start development servers'"
+  },
+  "workspaces": [
+    "frontend"
+  ],
+  "engines": {
+    "node": ">=18.0.0",
+    "npm": ">=9.0.0"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/dshap47/bwr-tools"
+  },
+  "keywords": [
+    "plotly",
+    "visualization",
+    "charts",
+    "streamlit",
+    "ag-grid",
+    "blockworks",
+    "finance",
+    "crypto",
+    "defi"
+  ],
+  "author": "Daniel Shapiro <daniel.shapiro@blockworks.co>",
+  "license": "MIT",
+  "devDependencies": {
+    "concurrently": "^8.2.2"
+  }
+}

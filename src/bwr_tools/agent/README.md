@@ -1,0 +1,1 @@
+Agent that uses data_sources to fetch data and viz to generate images to write research reports or do research.
