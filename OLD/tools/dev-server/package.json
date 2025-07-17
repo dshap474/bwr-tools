@@ -1,0 +1,14 @@
+{
+  "name": "@bwr-tools/dev-server",
+  "version": "0.0.0",
+  "private": true,
+  "description": "Python comparison server for development",
+  "type": "module",
+  "scripts": {
+    "start": "python server.py",
+    "dev": "nodemon --exec python server.py"
+  },
+  "devDependencies": {
+    "nodemon": "^3.0.3"
+  }
+}

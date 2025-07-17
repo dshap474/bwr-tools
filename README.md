@@ -1,3 +1,4 @@
+<<<<<<< HEAD
 # BWR Plots
 
 A Python library designed for creating Blockworks Research branded data visualizations using Plotly and interactive tables using AG-Grid within a Streamlit environment.
@@ -185,3 +186,45 @@ Refer to the Python scripts in the `examples/` directory for detailed usage patt
 ## License
 
 Copyright (c) Blockworks Research
+=======
+# BWR Tools
+
+Advanced plotting and data visualization tools built with Next.js, TypeScript, and Tailwind CSS.
+
+## Getting Started
+
+First, run the development server:
+
+```bash
+npm run dev
+```
+
+Open [http://localhost:4000](http://localhost:4000) with your browser to see the result.
+
+## Features
+
+- **BWR Plots**: TypeScript plotting application with pixel-perfect accuracy
+- **DeFiLlama Tool**: Advanced DeFi data analysis and visualization
+- **Modern UI**: Built with shadcn/ui components and Tailwind CSS
+- **Type Safe**: Full TypeScript support throughout
+
+## Project Structure
+
+```
+src/
+├── app/                 # Next.js App Router
+├── components/          # Reusable UI components
+├── features/           # Feature-specific logic
+├── hooks/              # Custom React hooks
+├── lib/                # Utilities and integrations
+└── utils/              # General helper functions
+```
+
+## Tech Stack
+
+- **Framework**: Next.js 15 with App Router
+- **Language**: TypeScript
+- **Styling**: Tailwind CSS
+- **UI Components**: shadcn/ui
+- **Development**: ESLint, Prettier
+>>>>>>> a329ee7 (Update all changes - 2025-07-17 10:44:26)
