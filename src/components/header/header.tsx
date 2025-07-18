@@ -3,10 +3,11 @@
 import Link from 'next/link'
 import { usePathname } from 'next/navigation'
 import { Button } from '@/components/ui/button'
+import { TOOLS } from '@/lib/constants'
 
 export function Header() {
   const pathname = usePathname()
-  const isToolsPage = pathname.startsWith('/plots') || pathname.startsWith('/defillama')
+  const isToolsPage = pathname.startsWith('/plots') || pathname.startsWith('/defillama') || pathname.startsWith('/newsletter')
 
   return (
     <header className="border-b bg-background">
@@ -18,9 +19,17 @@ export function Header() {
           <Button variant={!isToolsPage ? "default" : "ghost"} asChild>
             <Link href="/">Home</Link>
           </Button>
-          <Button variant={isToolsPage ? "default" : "ghost"} asChild>
-            <Link href="/plots">Tools</Link>
-          </Button>
+          
+          {/* Tool Selection */}
+          {TOOLS.map((tool) => (
+            <Button
+              key={tool.path}
+              variant={pathname === tool.path ? "default" : "ghost"}
+              asChild
+            >
+              <Link href={tool.path}>{tool.name}</Link>
+            </Button>
+          ))}
         </nav>
       </div>
     </header>

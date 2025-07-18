@@ -149,6 +149,8 @@ next-env.d.ts
 =======
 # Core
 
+external/
+
 # dependencies
 /node_modules
 /.pnp

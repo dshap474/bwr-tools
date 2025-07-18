@@ -1,3 +1,0 @@
-"""
-BWR Plots test module
-"""

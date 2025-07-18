@@ -8,6 +8,7 @@ export const ROUTES = {
   home: '/',
   plots: '/plots',
   defillama: '/defillama',
+  newsletter: '/newsletter',
   about: '/about',
 } as const
 
@@ -33,6 +34,17 @@ export const TOOLS = [
       'Market share analysis',
       'Historical trend analysis',
       'Cross-protocol comparisons',
+    ],
+  },
+  {
+    name: 'Newsletter',
+    path: ROUTES.newsletter,
+    description: 'Daily newsletter content and insights',
+    features: [
+      'Market insights and analysis',
+      'Key metrics and trends',
+      'Research summaries',
+      'Content suggestions',
     ],
   },
 ] as const

@@ -1,0 +1,89 @@
+
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Chart Comparison Report</title>
+    <style>
+        body { font-family: Arial, sans-serif; margin: 20px; background: #f5f5f5; }
+        .container { max-width: 1400px; margin: 0 auto; }
+        .result { 
+            background: #f8d7da; 
+            color: #721c24;
+            padding: 15px;
+            border-radius: 5px;
+            margin-bottom: 20px;
+        }
+        .images { display: flex; gap: 20px; flex-wrap: wrap; }
+        .image-container { 
+            flex: 1; 
+            min-width: 400px; 
+            background: white; 
+            padding: 10px;
+            border-radius: 5px;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+        }
+        .image-container h3 { margin-top: 0; }
+        .image-container img { width: 100%; height: auto; border: 1px solid #ddd; }
+        .stats { margin-top: 20px; }
+        .stats table { width: 100%; background: white; border-collapse: collapse; }
+        .stats th, .stats td { padding: 10px; text-align: left; border: 1px solid #ddd; }
+        .stats th { background: #f8f9fa; }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>Chart Pixel Comparison Report</h1>
+        
+        <div class="result">
+            <h2>❌ FAIL</h2>
+            <p>Difference: 23.04% (477819 pixels)</p>
+        </div>
+        
+        <div class="images">
+            <div class="image-container">
+                <h3>Expected</h3>
+                <img src="/Users/daniel/Documents/seven7s/external/bwr-tools/tests/bwr-plots-test/example.png" alt="Expected">
+            </div>
+            <div class="image-container">
+                <h3>Actual</h3>
+                <img src="/Users/daniel/Documents/seven7s/external/bwr-tools/tests/bwr-plots-test/actual.png" alt="Actual">
+            </div>
+            <div class="image-container">
+                <h3>Difference</h3>
+                <img src="/Users/daniel/Documents/seven7s/external/bwr-tools/tests/bwr-plots-test/diff.png" alt="Difference">
+            </div>
+        </div>
+        
+        <div class="stats">
+            <h3>Comparison Statistics</h3>
+            <table>
+                <tr>
+                    <th>Metric</th>
+                    <th>Value</th>
+                </tr>
+                <tr>
+                    <td>Total Pixels</td>
+                    <td>2,073,600</td>
+                </tr>
+                <tr>
+                    <td>Different Pixels</td>
+                    <td>477,819</td>
+                </tr>
+                <tr>
+                    <td>Difference Percentage</td>
+                    <td>23.0430%</td>
+                </tr>
+                <tr>
+                    <td>Match Status</td>
+                    <td>FAIL</td>
+                </tr>
+                <tr>
+                    <td>Generated</td>
+                    <td>7/17/2025, 7:31:39 PM</td>
+                </tr>
+            </table>
+        </div>
+    </div>
+</body>
+</html>
+  
