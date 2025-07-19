@@ -1,15 +1,23 @@
 'use client'
 
 import { useState, useEffect } from 'react'
-import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
-import { Button } from '@/components/ui/button'
-import { Badge } from '@/components/ui/badge'
 import { defiLlamaAPI } from '@/lib/api-wrappers/defillama-api-wrapper'
 import { coinGeckoAPI } from '@/lib/api-wrappers/coingecko-api-wrapper'
 import { DeFiAnalyticsService } from '@/lib/services/defi-analytics-service'
 import { protocolMappingService } from '@/lib/services/protocol-mapping-service'
 import type { ProtocolMappingResult } from '@/lib/api-wrappers/coingecko-api-wrapper'
-import { LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, Legend, ResponsiveContainer } from 'recharts'
+import { Button } from '@/components/ui/button'
+
+// Import components
+import NewsletterHeader from './components/newsletter-header'
+import PeriodSelector from './components/period-selector'
+import RevenueChart from './components/revenue-chart'
+import RevenueStats from './components/revenue-stats'
+import ProtocolTable from './components/protocol-table'
+import ExcludedProtocols from './components/excluded-protocols'
+import NewsflowPlaceholder from './components/newsflow-placeholder'
+import AssetView from './components/asset-view'
+import LoadingProgress from './components/loading-progress'
 
 interface IndexData {
   date: string
@@ -27,28 +35,42 @@ interface RevenueIndexData {
   top_protocols: string[]
   total_revenue: number
   protocol_revenues?: ProtocolRevenue[]
+  weighting_strategy?: string
+  protocols_count?: number
 }
 
 interface ProtocolRevenue {
   name: string
   slug: string
   quarterly_revenue: number
+  monthly_revenue?: number
   market_cap: number
   weight: number
   token?: string
+  coingecko_id?: string | null
   mapping_confidence?: number
   mapping_status?: 'success' | 'partial' | 'failed'
   match_method?: string
+  defillama_slug?: string | null
+  defillama_name?: string | null
+  is_tokenless?: boolean
 }
 
-type TabType = 'indices' | 'newsflow'
+type TabType = 'indices' | 'dashboards' | 'newsflow'
 type TimePeriod = 'W' | 'M' | 'Q' | 'Y'
-type ViewType = 'chart' | 'table'
+type ViewType = 'chart' | 'asset'
+
+interface LoadingStep {
+  name: string
+  status: 'pending' | 'loading' | 'completed' | 'error'
+  progress: number
+}
 
 export default function NewsletterPage() {
   const [indexData, setIndexData] = useState<IndexData[]>([])
   const [revenueIndexData, setRevenueIndexData] = useState<RevenueIndexData[]>([])
   const [loading, setLoading] = useState(false)
+  const [chartDataLoading, setChartDataLoading] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [activeTab, setActiveTab] = useState<TabType>('indices')
   const [timePeriod, setTimePeriod] = useState<TimePeriod>('W')
@@ -57,48 +79,194 @@ export default function NewsletterPage() {
   const [revenueDataCache, setRevenueDataCache] = useState<Record<TimePeriod, RevenueIndexData[]>>({} as Record<TimePeriod, RevenueIndexData[]>)
   const [loadingPeriods, setLoadingPeriods] = useState<Set<TimePeriod>>(new Set())
   const [protocolRevenues, setProtocolRevenues] = useState<ProtocolRevenue[]>([])
-  const [excludedProtocols] = useState<string[]>(['Tether', 'Circle', 'Phantom', 'Coinbase Wallet', 'MetaMask'])
+  const [chartDataAvailable, setChartDataAvailable] = useState(false)
+  const [excludedProtocols] = useState<string[]>(['Tether', 'Circle', 'Phantom', 'Coinbase Wallet', 'MetaMask', 'Axiom', 'Trojan', 'GMGN', 'Bloom Trading Bot'])
+  
+  // Loading progress state
+  const [loadingSteps, setLoadingSteps] = useState<LoadingStep[]>([
+    { name: 'Revenue Data', status: 'pending', progress: 0 },
+    { name: 'Protocol Mappings', status: 'pending', progress: 0 },
+    { name: 'Market Cap Data', status: 'pending', progress: 0 },
+    { name: 'Asset Price Data', status: 'pending', progress: 0 },
+    { name: 'Caching Periods', status: 'pending', progress: 0 }
+  ])
+  const [currentLoadingStep, setCurrentLoadingStep] = useState<string>('Initializing...')
+  const [showLoadingProgress, setShowLoadingProgress] = useState(false)
   
   // Initialize DeFi Analytics Service for enhanced protocol mapping
   const [defiAnalyticsService] = useState(() => new DeFiAnalyticsService(defiLlamaAPI, coinGeckoAPI))
 
-  // Check if a protocol is known to not have a token (for backward compatibility)
+  // Helper functions to update loading progress
+  const updateLoadingStep = (stepName: string, status: LoadingStep['status'], progress: number) => {
+    setLoadingSteps(prev => prev.map(step => 
+      step.name === stepName 
+        ? { ...step, status, progress }
+        : step
+    ))
+  }
+
+  const updateCurrentStep = (stepName: string) => {
+    setCurrentLoadingStep(stepName)
+  }
+
+  const getOverallProgress = () => {
+    const totalProgress = loadingSteps.reduce((sum, step) => sum + step.progress, 0)
+    return totalProgress / loadingSteps.length
+  }
+
+  // Enhanced protocol name normalization for better token mapping
+  const normalizeProtocolName = (protocolName: string): string => {
+    const name = protocolName.toLowerCase().trim()
+    
+    console.log(`🔄 Normalizing: "${protocolName}" -> "${name}"`)
+    
+    // Handle specific protocol variations with exact mappings
+    const protocolMappings: Record<string, string> = {
+      'hyperliquid spot orderbook': 'Hyperliquid',
+      'pancakeswap amm': 'PancakeSwap', 
+      'uniswap labs': 'Uniswap',
+      'aave v3': 'AAVE',
+      'sky lending': 'Lido', // Sky is related to MakerDAO/Lido
+      'raydium amm': 'Raydium',
+      'jupiter perpetual exchange': 'Jupiter',
+      'jupiter aggregator': 'Jupiter',
+      'aerodrome slipstream': 'Aerodrome',
+      'lido': 'Lido',
+      'pendle': 'Pendle'
+    }
+    
+    // Try exact mapping first
+    if (protocolMappings[name]) {
+      console.log(`✅ Exact mapping: "${name}" -> "${protocolMappings[name]}"`)
+      return protocolMappings[name]
+    }
+    
+    // Handle pattern-based mappings
+    if (name.includes('hyperliquid')) {
+      console.log(`✅ Pattern mapping: hyperliquid -> Hyperliquid`)
+      return 'Hyperliquid'
+    }
+    
+    if (name.includes('pancakeswap')) {
+      console.log(`✅ Pattern mapping: pancakeswap -> PancakeSwap`)
+      return 'PancakeSwap'
+    }
+    
+    if (name.includes('uniswap')) {
+      console.log(`✅ Pattern mapping: uniswap -> Uniswap`)
+      return 'Uniswap'
+    }
+    
+    if (name.includes('aave')) {
+      console.log(`✅ Pattern mapping: aave -> AAVE`)
+      return 'AAVE'
+    }
+    
+    if (name.includes('lido') || name.includes('sky')) {
+      console.log(`✅ Pattern mapping: lido/sky -> Lido`)
+      return 'Lido'
+    }
+    
+    if (name.includes('raydium')) {
+      console.log(`✅ Pattern mapping: raydium -> Raydium`)
+      return 'Raydium'
+    }
+    
+    if (name.includes('jupiter')) {
+      console.log(`✅ Pattern mapping: jupiter -> Jupiter`)
+      return 'Jupiter'
+    }
+    
+    if (name.includes('aerodrome')) {
+      console.log(`✅ Pattern mapping: aerodrome -> Aerodrome`)
+      return 'Aerodrome'
+    }
+    
+    if (name.includes('pendle')) {
+      console.log(`✅ Pattern mapping: pendle -> Pendle`)
+      return 'Pendle'
+    }
+    
+    console.log(`⚪ No normalization needed: "${protocolName}"`)
+    return protocolName
+  }
+
+  // Check if a protocol is actually tokenless using mapping service
   const isTokenlessProtocol = (protocolName: string): boolean => {
-    const tokenlessProtocols = new Set([
+    // First try the normalized name
+    const normalizedName = normalizeProtocolName(protocolName)
+    
+    // Check the mapping service for tokenless status
+    const isTokenlessFromService = protocolMappingService.isTokenlessProtocol(normalizedName)
+    if (isTokenlessFromService) {
+      return true
+    }
+    
+    // Also check the original name
+    const isTokenlessOriginal = protocolMappingService.isTokenlessProtocol(protocolName)
+    if (isTokenlessOriginal) {
+      return true
+    }
+    
+    // Known tokenless protocols that are infrastructure/wallets only
+    const knownTokenless = new Set([
       'axiom',
-      'hyperliquid spot orderbook',
-      'aerodrome slipstream',
-      'uniswap labs',
       'phantom',
       'coinbase wallet',
       'metamask',
     ])
     
+    const lowerName = protocolName.toLowerCase()
+    return knownTokenless.has(lowerName) ||
+           Array.from(knownTokenless).some(excluded => lowerName.includes(excluded))
+  }
+
+  // Enhanced protocol exclusion check
+  const isExcludedProtocol = (protocolName: string): boolean => {
     const normalizedName = protocolName.toLowerCase()
-    return tokenlessProtocols.has(normalizedName) ||
-           Array.from(tokenlessProtocols).some(excluded => normalizedName.includes(excluded))
-  }
-
-  // Helper function to get confidence color styling
-  const getConfidenceColor = (confidence: number): string => {
-    if (confidence >= 0.8) return 'text-green-600'
-    if (confidence >= 0.6) return 'text-yellow-600'
-    if (confidence >= 0.4) return 'text-orange-600'
-    return 'text-red-600'
-  }
-
-  // Helper function to get status badge styling
-  const getStatusBadgeClass = (status: 'success' | 'partial' | 'failed'): string => {
-    switch (status) {
-      case 'success':
-        return 'bg-green-100 text-green-800 border-green-200'
-      case 'partial':
-        return 'bg-yellow-100 text-yellow-800 border-yellow-200'
-      case 'failed':
-        return 'bg-red-100 text-red-800 border-red-200'
-      default:
-        return 'bg-gray-100 text-gray-800 border-gray-200'
+    const normalizedExcluded = excludedProtocols.map(p => p.toLowerCase())
+    
+    // Direct match
+    if (normalizedExcluded.includes(normalizedName)) {
+      return true
     }
+    
+    // Partial match for protocol variations
+    return normalizedExcluded.some(excluded => {
+      return normalizedName.includes(excluded) || excluded.includes(normalizedName)
+    })
+  }
+
+  // Enhanced protocol combination logic
+  const combineRelatedProtocols = (protocol: string): string => {
+    const protocolLower = protocol.toLowerCase()
+    
+    // Pump.fun ecosystem
+    if (protocolLower.includes('pump') && (protocolLower.includes('swap') || protocolLower.includes('bot'))) {
+      return 'pump.fun'
+    }
+    
+    // BONK ecosystem  
+    if (protocolLower.includes('bonk') && protocolLower.includes('bot')) {
+      return 'letsBONK.fun'
+    }
+    
+    // Uniswap variations
+    if (protocolLower.includes('uniswap')) {
+      return 'Uniswap Labs'
+    }
+    
+    // PancakeSwap variations
+    if (protocolLower.includes('pancake')) {
+      return 'PancakeSwap AMM'
+    }
+    
+    // AAVE variations
+    if (protocolLower.includes('aave')) {
+      return 'AAVE V3'
+    }
+    
+    return protocol
   }
 
   const getStartOfPeriod = (period: TimePeriod): Date => {
@@ -128,30 +296,23 @@ export default function NewsletterPage() {
     return startOfPeriod
   }
 
-  const loadRevenueIndexData = async (period: TimePeriod, forceRefresh = false) => {
-    // If data is already cached and we're not forcing refresh, use cached data
-    if (revenueDataCache[period] && !forceRefresh) {
-      setRevenueIndexData(revenueDataCache[period])
-      return
-    }
-
-    // Mark this period as loading
-    setLoadingPeriods(prev => new Set([...prev, period]))
-    if (period === timePeriod) {
-      setLoading(true)
-    }
+  // Load basic revenue data for the table (instant loading)
+  const loadBasicRevenueData = async () => {
+    console.log('🔄 Loading basic revenue data for table...')
+    setLoading(true)
     setError(null)
     
     try {
-      console.log(`Loading revenue index data for period: ${period}`)
-      
       // Get historical revenue data for quarterly calculation
       const revenueData = await defiLlamaAPI.getTotalCryptoRevenue(true)
       
-      // Calculate quarterly revenue for each protocol
+      // Calculate quarterly and monthly revenue for each protocol
       const quarterlyRevenue: Record<string, number> = {}
+      const monthlyRevenue: Record<string, number> = {}
       const threeMonthsAgo = new Date()
       threeMonthsAgo.setMonth(threeMonthsAgo.getMonth() - 3)
+      const oneMonthAgo = new Date()
+      oneMonthAgo.setMonth(oneMonthAgo.getMonth() - 1)
       
       console.log(`Filtering revenue data from ${threeMonthsAgo.toISOString()} to ${new Date().toISOString()}`)
       
@@ -160,81 +321,251 @@ export default function NewsletterPage() {
         new Date(point.timestamp) >= threeMonthsAgo
       )
       
+      // Filter to last 1 month for monthly revenue
+      const monthlyRevenueData = revenueData.filter(point => 
+        new Date(point.timestamp) >= oneMonthAgo
+      )
+      
       recentRevenue.forEach(point => {
         Object.entries(point).forEach(([protocol, revenue]) => {
           if (protocol !== 'timestamp' && protocol !== 'total_crypto_revenue' && typeof revenue === 'number') {
-            // Combine related protocols
-            let combinedProtocol = protocol
-            
-            // Combine pump.fun ecosystem
-            if (protocol === 'PumpSwap') {
-              combinedProtocol = 'pump.fun'
-            }
-            
-            // Combine BONK ecosystem  
-            if (protocol === 'BONKbot') {
-              combinedProtocol = 'letsBONK.fun'
-            }
-            
+            // Use enhanced protocol combination logic
+            const combinedProtocol = combineRelatedProtocols(protocol)
             quarterlyRevenue[combinedProtocol] = (quarterlyRevenue[combinedProtocol] || 0) + revenue
           }
         })
       })
       
-      // Filter out excluded protocols (stablecoins, etc.)
-      const filteredRevenue = Object.entries(quarterlyRevenue)
-        .filter(([protocol]) => !excludedProtocols.includes(protocol))
+      monthlyRevenueData.forEach(point => {
+        Object.entries(point).forEach(([protocol, revenue]) => {
+          if (protocol !== 'timestamp' && protocol !== 'total_crypto_revenue' && typeof revenue === 'number') {
+            // Use enhanced protocol combination logic
+            const combinedProtocol = combineRelatedProtocols(protocol)
+            monthlyRevenue[combinedProtocol] = (monthlyRevenue[combinedProtocol] || 0) + revenue
+          }
+        })
+      })
       
-      // Get top 25 protocols by quarterly revenue (after exclusions)
+      // Filter out excluded protocols using enhanced exclusion check
+      const filteredRevenue = Object.entries(quarterlyRevenue)
+        .filter(([protocol]) => !isExcludedProtocol(protocol))
+      
+      // Get top 50 protocols by quarterly revenue (after exclusions)
       const topProtocolsByRevenue = filteredRevenue
         .sort(([, a], [, b]) => b - a)
-        .slice(0, 25)
+        .slice(0, 50)
         .map(([protocol, revenue]) => ({ protocol, revenue }))
       
-      // Get all protocols from DeFiLlama (for token symbol matching only, NOT market cap)
-      const allProtocols = await defiLlamaAPI.getAllProtocols()
+      console.log('Top 50 protocols by quarterly revenue (after exclusions):', topProtocolsByRevenue)
       
-      console.log('Top 25 protocols by quarterly revenue (after exclusions):', topProtocolsByRevenue)
-      console.log('Total protocols found:', Object.keys(quarterlyRevenue).length)
-      console.log('Excluded protocols:', excludedProtocols)
+      // Get basic protocol mappings from cache (without API calls)
+      const basicProtocolData: ProtocolRevenue[] = topProtocolsByRevenue.map(({ protocol, revenue }) => {
+        const normalizedName = normalizeProtocolName(protocol)
+        const coingeckoId = protocolMappingService.getCoinGeckoId(protocol) || protocolMappingService.getCoinGeckoId(normalizedName)
+        const defillamaSlug = protocolMappingService.getDeFiLlamaSlug(protocol) || protocolMappingService.getDeFiLlamaSlug(normalizedName)
+        const defillamaName = protocolMappingService.getDeFiLlamaName(protocol) || protocolMappingService.getDeFiLlamaName(normalizedName)
+        const isTokenless = protocolMappingService.isTokenlessProtocol(protocol) || protocolMappingService.isTokenlessProtocol(normalizedName)
+        
+        // Get basic token symbol if available
+        let tokenSymbol: string | undefined
+        let mappingStatus: 'success' | 'partial' | 'failed' = 'failed'
+        
+        if (coingeckoId) {
+          // Try to extract token symbol from CoinGecko ID
+          const symbolMap: Record<string, string> = {
+            'hyperliquid': 'HYPE',
+            'pancakeswap-token': 'CAKE',
+            'pump-fun': 'PUMP',
+            'bonk': 'BONK',
+            'aerodrome-finance': 'AERO',
+            'sky': 'SKY',
+            'aave': 'AAVE',
+            'lido-dao': 'LDO',
+            'raydium': 'RAY',
+            'uniswap': 'UNI',
+            'pendle': 'PENDLE',
+            'thorchain': 'RUNE'
+          }
+          tokenSymbol = symbolMap[coingeckoId] || coingeckoId.toUpperCase()
+          mappingStatus = 'partial' // We have mapping but no market cap yet
+        } else if (isTokenless) {
+          mappingStatus = 'success' // Tokenless protocols are successfully identified
+        }
+        
+        return {
+          name: protocol,
+          slug: protocol.toLowerCase().replace(/\s+/g, '-'),
+          quarterly_revenue: revenue,
+          monthly_revenue: monthlyRevenue[protocol] || 0,
+          market_cap: 0, // Will be filled when chart data is loaded
+          weight: 0, // Will be calculated when chart data is loaded
+          token: tokenSymbol,
+          coingecko_id: coingeckoId,
+          mapping_confidence: coingeckoId ? 0.8 : 0,
+          mapping_status: mappingStatus,
+          match_method: coingeckoId ? 'cached' : 'none',
+          defillama_slug: defillamaSlug,
+          defillama_name: defillamaName,
+          is_tokenless: isTokenless
+        }
+      })
       
-      // Use enhanced protocol mapping for ALL protocols
-      console.log('🔍 Starting enhanced protocol mapping with confidence scoring...')
+      setProtocolRevenues(basicProtocolData)
+      console.log(`✅ Loaded basic data for ${basicProtocolData.length} protocols`)
+      
+    } catch (err) {
+      console.error('Error loading basic revenue data:', err)
+      setError('Failed to load revenue data')
+    } finally {
+      setLoading(false)
+    }
+  }
+
+  // Load enhanced data for charts (triggered by button)
+  const loadChartData = async (period: TimePeriod, forceRefresh = false) => {
+    console.log(`🔄 Loading chart data for period: ${period}`)
+    
+    // If chart data is already cached and we're not forcing refresh, use cached data
+    if (revenueDataCache[period] && !forceRefresh && chartDataAvailable) {
+      console.log(`📋 Using cached chart data for period: ${period}`)
+      setRevenueIndexData(revenueDataCache[period])
+      return
+    }
+
+    setChartDataLoading(true)
+    setShowLoadingProgress(true)
+    setError(null)
+    
+    // Reset loading steps
+    setLoadingSteps([
+      { name: 'Protocol Mappings', status: 'pending', progress: 0 },
+      { name: 'Market Cap Data', status: 'pending', progress: 0 },
+      { name: 'Asset Price Data', status: 'pending', progress: 0 },
+      { name: 'Caching Periods', status: 'pending', progress: 0 }
+    ])
+    
+    try {
+      if (protocolRevenues.length === 0) {
+        await loadBasicRevenueData()
+      }
+      
+      // Update loading progress - Protocol Mappings
+      updateCurrentStep('Loading protocol mappings...')
+      updateLoadingStep('Protocol Mappings', 'loading', 50)
+      
+      const topProtocolsByRevenue = protocolRevenues.map(p => ({
+        protocol: p.name,
+        revenue: p.quarterly_revenue
+      }))
+      
+      // Use cached protocol mapping service for enhanced mappings
+      console.log('🔍 Loading enhanced protocol mappings...')
+      const protocolNames = topProtocolsByRevenue.reduce((acc: string[], p) => {
+        acc.push(p.protocol)
+        const normalized = normalizeProtocolName(p.protocol)
+        if (normalized !== p.protocol) {
+          acc.push(normalized)
+        }
+        return acc
+      }, [])
+      
+      let cachedMappings: Map<string, ProtocolMappingResult> = new Map()
+      
+      try {
+        cachedMappings = await Promise.race([
+          protocolMappingService.getProtocolMappings(protocolNames),
+          new Promise<never>((_, reject) => 
+            setTimeout(() => reject(new Error('Protocol mapping timeout')), 120000)
+          )
+        ])
+        updateLoadingStep('Protocol Mappings', 'completed', 100)
+        updateCurrentStep('Protocol mappings completed')
+      } catch (error) {
+        console.warn('Protocol mapping failed, using cached data:', error)
+        updateLoadingStep('Protocol Mappings', 'error', 50)
+        updateCurrentStep('Protocol mappings failed, continuing...')
+      }
+      
+      await new Promise(resolve => setTimeout(resolve, 100))
+      
+      // Process mappings
       const mappingResults: Array<{
         protocol: string
         revenue: number
+        monthly_revenue: number
         mapping: ProtocolMappingResult
       }> = []
       
-      for (let i = 0; i < topProtocolsByRevenue.length; i++) {
-        const { protocol, revenue } = topProtocolsByRevenue[i]
+      for (const { protocol, revenue } of topProtocolsByRevenue) {
+        const protocolData = protocolRevenues.find(p => p.name === protocol)
+        let mapping = cachedMappings.get(protocol)
         
-        console.log(`\\n🔎 [${i + 1}/25] Mapping protocol: ${protocol}`)
+        if (!mapping || mapping.confidence === 0) {
+          const normalizedName = normalizeProtocolName(protocol)
+          if (normalizedName !== protocol) {
+            const normalizedMapping = cachedMappings.get(normalizedName)
+            if (normalizedMapping && normalizedMapping.confidence > 0) {
+              mapping = normalizedMapping
+            }
+          }
+        }
         
-        // Use enhanced protocol mapping with confidence scoring
-        const mapping = await coinGeckoAPI.findCoinByProtocolNameWithConfidence(protocol)
-        mappingResults.push({ protocol, revenue, mapping })
-        
-        // Rate limiting: 2 seconds between requests to stay under 30/minute
-        if (i < topProtocolsByRevenue.length - 1) {
-          await new Promise(resolve => setTimeout(resolve, 2000))
+        if (mapping && mapping.confidence > 0) {
+          mappingResults.push({ 
+            protocol, 
+            revenue, 
+            monthly_revenue: protocolData?.monthly_revenue || 0, 
+            mapping 
+          })
+        } else {
+          mappingResults.push({ 
+            protocol, 
+            revenue, 
+            monthly_revenue: protocolData?.monthly_revenue || 0,
+            mapping: {
+              coin: null,
+              confidence: 0,
+              matchMethod: 'failed',
+              searchVariations: []
+            }
+          })
         }
       }
       
-      // Batch fetch market caps for successful mappings (confidence >= 0.4)
-      console.log('\\n💰 Fetching market caps for successfully mapped protocols...')
+      // Update loading progress - Market Cap Data
+      updateCurrentStep('Fetching market cap data...')
+      updateLoadingStep('Market Cap Data', 'loading', 75)
+      
       const successfulMappings = mappingResults
         .filter(result => result.mapping.coin && result.mapping.confidence >= 0.4)
         .map(result => result.mapping.coin!.id)
       
-      console.log(`📈 Getting market caps for ${successfulMappings.length} protocols`)
+      let marketCaps: Record<string, number> = {}
+      if (successfulMappings.length > 0) {
+        try {
+          const response = await fetch('/api/market-caps', {
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/json',
+            },
+            body: JSON.stringify({ coinIds: successfulMappings })
+          })
+          
+          if (response.ok) {
+            const data = await response.json()
+            marketCaps = data.marketCaps || {}
+          }
+        } catch (error) {
+          console.warn('Market cap fetch failed:', error)
+        }
+      }
       
-      const marketCaps = successfulMappings.length > 0 
-        ? await coinGeckoAPI.getMarketCapByIds(successfulMappings)
-        : {}
+      updateLoadingStep('Market Cap Data', 'completed', 100)
+      updateCurrentStep('Market cap data completed')
+      await new Promise(resolve => setTimeout(resolve, 100))
       
-      // Process and combine all data with confidence and status information
-      const topProtocols = mappingResults.map(({ protocol, revenue, mapping }) => {
+      // Process enhanced protocol data
+      const enhancedProtocols = mappingResults.map(({ protocol, revenue, monthly_revenue, mapping }) => {
         let marketCap: number = 0
         let mappingStatus: 'success' | 'partial' | 'failed' = 'failed'
         let tokenSymbol: string | undefined = undefined
@@ -242,18 +573,21 @@ export default function NewsletterPage() {
         if (mapping.coin && mapping.confidence >= 0.4) {
           marketCap = marketCaps[mapping.coin.id] || 0
           mappingStatus = marketCap > 0 ? 'success' : 'partial'
-          
-          // Only show token symbol if not a tokenless protocol
-          if (!isTokenlessProtocol(protocol)) {
-            tokenSymbol = mapping.coin.symbol?.toUpperCase()
+          tokenSymbol = mapping.coin.symbol?.toUpperCase()
+        } else if (mapping.coin && mapping.coin.symbol) {
+          tokenSymbol = mapping.coin.symbol?.toUpperCase()
+          mappingStatus = 'partial'
+        } else {
+          const isActuallyTokenless = protocolMappingService.isTokenlessProtocol(protocol)
+          if (isActuallyTokenless) {
+            mappingStatus = 'success'
           }
-        } else if (isTokenlessProtocol(protocol)) {
-          mappingStatus = 'success' // Consider tokenless protocols as successfully identified
         }
         
         return {
           protocol,
           revenue,
+          monthly_revenue,
           tokenSymbol,
           marketCap,
           mappingStatus,
@@ -262,308 +596,220 @@ export default function NewsletterPage() {
         }
       })
       
-      console.log('\\n📊 Enhanced mapping results:')
-      mappingResults.forEach((result, i) => {
-        const protocol = topProtocols[i]
-        console.log(`${result.protocol} -> Token: ${protocol.tokenSymbol || 'N/A'} -> MarketCap: $${protocol.marketCap.toLocaleString()} -> Status: ${protocol.mappingStatus} -> Confidence: ${(protocol.confidence * 100).toFixed(0)}% (${protocol.matchMethod})`)
+      // Calculate weights and create enhanced protocol data
+      const protocolsWithMarketCap = enhancedProtocols.filter(p => 
+        p.mappingStatus === 'success' && 
+        p.marketCap > 0 && 
+        p.tokenSymbol
+      )
+      const totalMarketCapSuccessful = protocolsWithMarketCap.reduce((sum, p) => sum + p.marketCap, 0)
+      const useMarketCapWeighting = protocolsWithMarketCap.length >= 5 && totalMarketCapSuccessful > 0
+      const weightingStrategy = useMarketCapWeighting ? 'market_cap' : 'equal'
+      
+      // Update protocol revenues with enhanced data
+      const enhancedProtocolRevenues: ProtocolRevenue[] = enhancedProtocols.map(p => {
+        const isTokenless = protocolMappingService.isTokenlessProtocol(p.protocol)
+        
+        let calculatedWeight = 0
+        if (useMarketCapWeighting && p.mappingStatus === 'success' && p.marketCap > 0 && p.tokenSymbol) {
+          calculatedWeight = p.marketCap / totalMarketCapSuccessful
+        } else if (!useMarketCapWeighting && p.mappingStatus === 'success' && p.tokenSymbol && !isTokenless) {
+          const eligibleProtocols = enhancedProtocols.filter(tp => 
+            tp.mappingStatus === 'success' && 
+            tp.tokenSymbol && 
+            !protocolMappingService.isTokenlessProtocol(tp.protocol)
+          )
+          calculatedWeight = eligibleProtocols.length > 0 ? 1 / eligibleProtocols.length : 0
+        }
+        
+        calculatedWeight = Math.max(0, Math.min(1, calculatedWeight || 0))
+        
+        return {
+          name: p.protocol,
+          slug: p.protocol.toLowerCase().replace(/\s+/g, '-'),
+          quarterly_revenue: p.revenue,
+          monthly_revenue: p.monthly_revenue,
+          market_cap: p.marketCap,
+          weight: calculatedWeight,
+          token: p.tokenSymbol,
+          coingecko_id: protocolMappingService.getCoinGeckoId(p.protocol),
+          mapping_confidence: p.confidence,
+          mapping_status: p.mappingStatus,
+          match_method: p.matchMethod,
+          defillama_slug: protocolMappingService.getDeFiLlamaSlug(p.protocol),
+          defillama_name: protocolMappingService.getDeFiLlamaName(p.protocol),
+          is_tokenless: isTokenless
+        }
       })
       
-      console.log('Protocol combination results:')
-      console.log(`- pump.fun + PumpSwap combined revenue: $${(quarterlyRevenue['pump.fun'] || 0).toLocaleString()}`)
-      console.log(`- letsBONK.fun + BONKbot combined revenue: $${(quarterlyRevenue['letsBONK.fun'] || 0).toLocaleString()}`)
+      setProtocolRevenues(enhancedProtocolRevenues)
       
-      // Calculate total market cap only from successfully mapped protocols for accurate percentages
-      const successfulProtocols = topProtocols.filter(p => p.mappingStatus === 'success' && p.marketCap > 0)
-      const totalMarketCapSuccessful = successfulProtocols.reduce((sum, p) => sum + p.marketCap, 0)
+      // Filter protocols for index
+      const eligibleProtocols = enhancedProtocolRevenues
+        .filter(p => 
+          p.token && 
+          !p.is_tokenless && 
+          p.mapping_status === 'success' &&
+          p.weight > 0
+        )
+        .slice(0, 25)
       
-      console.log(`\\n📊 Market cap calculation: ${successfulProtocols.length} successful mappings, total market cap: $${totalMarketCapSuccessful.toLocaleString()}`)
+      // Update loading progress - Asset Price Data
+      updateCurrentStep(`Fetching price data for ${eligibleProtocols.length} tokens...`)
+      updateLoadingStep('Asset Price Data', 'loading', 80)
       
-      // Store protocol revenue data for the table with enhanced mapping information
-      const protocolRevenueData: ProtocolRevenue[] = topProtocols.map(p => ({
-        name: p.protocol,
-        slug: p.protocol.toLowerCase().replace(/\s+/g, '-'),
-        quarterly_revenue: p.revenue,
-        market_cap: p.marketCap,
-        // Calculate weight based only on successfully mapped protocols with market cap data
-        weight: (p.mappingStatus === 'success' && p.marketCap > 0 && totalMarketCapSuccessful > 0) 
-          ? p.marketCap / totalMarketCapSuccessful 
-          : 0,
-        token: p.tokenSymbol,
-        mapping_confidence: p.confidence,
-        mapping_status: p.mappingStatus,
-        match_method: p.matchMethod
-      }))
+      let indexValues: RevenueIndexData[] = []
       
-      setProtocolRevenues(protocolRevenueData)
-      
-      // Calculate weights (market cap-weighted) - note: weights already calculated above in protocolRevenueData
-      const totalRevenue = topProtocols.reduce((sum, p) => sum + p.revenue, 0)
-      
-      // Generate mock historical data for the index
-      // In a real implementation, this would be calculated from historical rebalancing
-      const startDate = getStartOfPeriod(period)
-      const daysBack = Math.ceil((new Date().getTime() - startDate.getTime()) / (1000 * 60 * 60 * 24))
-      
-      const indexValues: RevenueIndexData[] = []
-      let baselineValue = 100
-      
-      // Create daily index values based on weighted average of protocol performance
-      for (let i = 0; i <= daysBack; i++) {
-        const date = new Date(startDate)
-        date.setDate(date.getDate() + i)
-        
-        // Simulate index performance (in real version, this would be actual protocol TVL/price data)
-        const randomChange = (Math.random() - 0.5) * 0.02 // +/- 1% daily volatility
-        const currentValue = i === 0 ? baselineValue : indexValues[i - 1].index_value * (1 + randomChange)
-        const changeFromBaseline = ((currentValue - baselineValue) / baselineValue) * 100
-        
-        indexValues.push({
-          date: date.toISOString(),
-          index_value: currentValue,
-          index_change: changeFromBaseline,
-          top_protocols: topProtocols.slice(0, 5).map(p => p.protocol),
-          total_revenue: totalRevenue
-        })
+      if (eligibleProtocols.length > 0) {
+        try {
+          const coinGeckoIds = eligibleProtocols
+            .map(p => protocolMappingService.getCoinGeckoId(p.name))
+            .filter(id => id !== null) as string[]
+          
+          const startDate = getStartOfPeriod(period)
+          const daysSinceStart = Math.ceil((new Date().getTime() - startDate.getTime()) / (1000 * 60 * 60 * 24))
+          const span = Math.min(Math.max(daysSinceStart, 1), 365)
+          
+          let allPriceData = []
+          
+          try {
+            const response = await fetch('/api/historical-prices', {
+              method: 'POST',
+              headers: {
+                'Content-Type': 'application/json',
+              },
+              body: JSON.stringify({ 
+                coinIds: coinGeckoIds,
+                days: span
+              })
+            })
+            
+            if (response.ok) {
+              const data = await response.json()
+              allPriceData = data.priceData || []
+            }
+          } catch (error) {
+            console.warn('Historical price fetch failed:', error)
+            allPriceData = coinGeckoIds.map(coinId => ({ coinId, prices: [] }))
+          }
+          
+          // Create price maps and calculate index
+          const priceMap = new Map<string, Map<string, number>>()
+          const allDates = new Set<string>()
+          
+          allPriceData.forEach((tokenData: any) => {
+            const { coinId, prices } = tokenData
+            const pricesByDate = new Map<string, number>()
+            
+            prices.forEach((point: [number, number]) => {
+              const dateKey = new Date(point[0]).toISOString().split('T')[0]
+              pricesByDate.set(dateKey, point[1])
+              allDates.add(dateKey)
+            })
+            
+            priceMap.set(coinId, pricesByDate)
+          })
+          
+          const sortedDates = Array.from(allDates).sort()
+          const startDateStr = startDate.toISOString().split('T')[0]
+          let baselineValue = 100
+          let hasBaseline = false
+          
+          sortedDates.forEach(dateKey => {
+            if (dateKey >= startDateStr) {
+              let weightedReturn = 0
+              let totalWeight = 0
+              
+              eligibleProtocols.forEach(protocol => {
+                const coinId = protocolMappingService.getCoinGeckoId(protocol.name)
+                if (coinId && priceMap.has(coinId)) {
+                  const prices = priceMap.get(coinId)!
+                  const currentPrice = prices.get(dateKey)
+                  const baselinePrice = prices.get(startDateStr) || prices.get(sortedDates.find(d => d >= startDateStr) || dateKey)
+                  
+                  if (currentPrice && baselinePrice && baselinePrice > 0) {
+                    const tokenReturn = (currentPrice - baselinePrice) / baselinePrice
+                    weightedReturn += tokenReturn * protocol.weight
+                    totalWeight += protocol.weight
+                  }
+                }
+              })
+              
+              if (totalWeight > 0) {
+                const indexReturn = weightedReturn / totalWeight
+                const currentValue = hasBaseline ? baselineValue * (1 + indexReturn) : baselineValue
+                
+                if (!hasBaseline) {
+                  hasBaseline = true
+                }
+                
+                const changeFromBaseline = ((currentValue - baselineValue) / baselineValue) * 100
+                
+                indexValues.push({
+                  date: dateKey,
+                  index_value: currentValue,
+                  index_change: changeFromBaseline,
+                  top_protocols: eligibleProtocols.slice(0, 5).map(p => p.name),
+                  total_revenue: eligibleProtocols.reduce((sum, p) => sum + p.quarterly_revenue, 0),
+                  protocol_revenues: eligibleProtocols,
+                  weighting_strategy: weightingStrategy,
+                  protocols_count: eligibleProtocols.length
+                })
+              }
+            }
+          })
+          
+          console.log(`✅ Generated ${indexValues.length} index data points`)
+          
+        } catch (error) {
+          console.warn('Failed to fetch price data:', error)
+        }
       }
+      
+      updateLoadingStep('Asset Price Data', 'completed', 100)
+      updateCurrentStep('Caching data...')
+      updateLoadingStep('Caching Periods', 'loading', 90)
       
       // Cache the data
       setRevenueDataCache(prev => ({ ...prev, [period]: indexValues }))
+      setRevenueIndexData(indexValues)
+      setChartDataAvailable(true)
       
-      // Only update display if this is the current period
-      if (period === timePeriod) {
-        setRevenueIndexData(indexValues)
-      }
+      updateLoadingStep('Caching Periods', 'completed', 100)
       
     } catch (err) {
-      if (period === timePeriod) {
-        setError('Failed to load revenue index data')
-      }
-      console.error(`Error loading revenue index data for ${period}:`, err)
+      console.error(`Error loading chart data:`, err)
+      setError(`Failed to load chart data: ${err instanceof Error ? err.message : 'Unknown error'}`)
     } finally {
-      // Remove from loading set
-      setLoadingPeriods(prev => {
-        const newSet = new Set(prev)
-        newSet.delete(period)
-        return newSet
-      })
-      
-      // Only update loading state if this is the current period
-      if (period === timePeriod) {
-        setLoading(false)
-      }
+      setChartDataLoading(false)
+      setTimeout(() => setShowLoadingProgress(false), 1000)
     }
   }
 
-  const loadIndexData = async (period: TimePeriod, forceRefresh = false) => {
-    // If data is already cached and we're not forcing refresh, use cached data
-    if (dataCache[period] && !forceRefresh) {
-      setIndexData(dataCache[period])
-      return
-    }
-
-    // Mark this period as loading
-    setLoadingPeriods(prev => new Set([...prev, period]))
-    if (period === timePeriod) {
-      setLoading(true)
-    }
-    setError(null)
-    
-    try {
-      const startDate = getStartOfPeriod(period)
-      const daysSinceStart = Math.ceil((new Date().getTime() - startDate.getTime()) / (1000 * 60 * 60 * 24))
-      const span = Math.min(Math.max(daysSinceStart, 1), 365)
-      
-      console.log(`Period: ${period}, Start: ${startDate.toISOString()}, Days: ${daysSinceStart}, Span: ${span}`)
-      
-      // Get price data for BTC, ETH, and SOL
-      const dataSpan = span
-      const dataInterval = '1d'
-      
-      const btcData = await defiLlamaAPI.getPriceChart(
-        'coingecko:bitcoin',
-        undefined,
-        undefined,
-        dataSpan,
-        dataInterval
-      )
-      
-      const ethData = await defiLlamaAPI.getPriceChart(
-        'coingecko:ethereum',
-        undefined,
-        undefined,
-        dataSpan,
-        dataInterval
-      )
-      
-      const solData = await defiLlamaAPI.getPriceChart(
-        'coingecko:solana',
-        undefined,
-        undefined,
-        dataSpan,
-        dataInterval
-      )
-
-      // Create a map for easier lookup
-      const getKey = (datetime: string) => datetime.split('T')[0]
-      
-      const btcPrices = new Map(btcData.map(d => [getKey(d.datetime), d.price]))
-      const ethPrices = new Map(ethData.map(d => [getKey(d.datetime), d.price]))
-      const solPrices = new Map(solData.map(d => [getKey(d.datetime), d.price]))
-
-      // Get all unique dates/times
-      const allDates = new Set([
-        ...btcData.map(d => getKey(d.datetime)),
-        ...ethData.map(d => getKey(d.datetime)),
-        ...solData.map(d => getKey(d.datetime))
-      ])
-
-      // Calculate equal-weighted index with performance since start of period
-      const indexValues: IndexData[] = []
-      const periodStartDate = getStartOfPeriod(period)
-      let baselineIndex = 0
-      let baselineBtc = 0
-      let baselineEth = 0
-      let baselineSol = 0
-
-      // Find the first data point on or after the start date
-      const sortedDates = Array.from(allDates).sort()
-      const startDateStr = periodStartDate.toISOString().split('T')[0]
-      
-      sortedDates.forEach((dateKey, i) => {
-        const btcPrice = btcPrices.get(dateKey)
-        const ethPrice = ethPrices.get(dateKey)
-        const solPrice = solPrices.get(dateKey)
-
-        if (btcPrice && ethPrice && solPrice) {
-          // Set baseline to the first data point at or after the start of the period
-          if (baselineIndex === 0 && dateKey >= startDateStr) {
-            baselineIndex = (btcPrice + ethPrice + solPrice) / 3
-            baselineBtc = btcPrice
-            baselineEth = ethPrice
-            baselineSol = solPrice
-          }
-
-          // Only include data points from the start of the period
-          if (dateKey >= startDateStr && baselineIndex > 0) {
-            const indexValue = (btcPrice + ethPrice + solPrice) / 3
-            const indexChange = ((indexValue - baselineIndex) / baselineIndex) * 100
-
-            indexValues.push({
-              date: dateKey,
-              btc_price: btcPrice,
-              eth_price: ethPrice,
-              sol_price: solPrice,
-              index_value: indexValue,
-              index_change: indexChange
-            })
-          }
-        }
-      })
-
-      // Cache the data
-      setDataCache(prev => ({ ...prev, [period]: indexValues }))
-      
-      // Only update display if this is the current period
-      if (period === timePeriod) {
-        setIndexData(indexValues)
-      }
-    } catch (err) {
-      if (period === timePeriod) {
-        setError('Failed to load index data')
-      }
-      console.error(`Error loading index data for ${period}:`, err)
-    } finally {
-      // Remove from loading set
-      setLoadingPeriods(prev => {
-        const newSet = new Set(prev)
-        newSet.delete(period)
-        return newSet
-      })
-      
-      // Only update loading state if this is the current period
-      if (period === timePeriod) {
-        setLoading(false)
-      }
-    }
-  }
-
-  const preloadAllData = async () => {
-    const periods: TimePeriod[] = ['W', 'M', 'Q', 'Y']
-    
-    // Start with current period for revenue index
-    await loadRevenueIndexData(timePeriod)
-    // Then preload other periods in background
-    periods.forEach(period => {
-      if (period !== timePeriod) {
-        loadRevenueIndexData(period).catch(err => {
-          console.warn(`Failed to preload revenue ${period} data:`, err)
-        })
-      }
-    })
-  }
-
-  const getCurrentStats = () => {
-    if (revenueIndexData.length === 0) return null
-    
-    const latest = revenueIndexData[revenueIndexData.length - 1]
-    const previous = revenueIndexData[revenueIndexData.length - 2]
-    
-    return {
-      currentChange: latest.index_change,
-      dailyChange: previous ? ((latest.index_value - previous.index_value) / previous.index_value) * 100 : 0,
-      totalRevenue: latest.total_revenue,
-      topProtocols: latest.top_protocols
-    }
-  }
-
-  const stats = getCurrentStats()
-
-  // Load data automatically when component mounts
+  // Load data automatically when component mounts (basic data only)
   useEffect(() => {
-    if (activeTab === 'indices') {
-      preloadAllData()
+    if (activeTab === 'indices' || activeTab === 'dashboards') {
+      loadBasicRevenueData()
     }
   }, [activeTab])
 
-  // Handle time period changes (instant switching if cached)
-  useEffect(() => {
-    if (activeTab === 'indices') {
-      if (revenueDataCache[timePeriod]) {
-        setRevenueIndexData(revenueDataCache[timePeriod])
-      } else {
-        loadRevenueIndexData(timePeriod)
-      }
+  // Handle time period changes for chart data
+  const handleTimePeriodChange = (period: TimePeriod) => {
+    setTimePeriod(period)
+    
+    // If chart data is available and cached for this period, load it
+    if (chartDataAvailable && revenueDataCache[period]) {
+      setRevenueIndexData(revenueDataCache[period])
+    } else if (chartDataAvailable) {
+      // If chart data was loaded for another period, load for this period too
+      loadChartData(period)
     }
-  }, [timePeriod])
+  }
 
   return (
-    <div className="min-h-screen -mt-8">
-      {/* Top Navigation */}
-      <div className="flex items-center justify-start py-2 px-6">
-        {/* Tab Navigation */}
-        <div className="flex border rounded-lg">
-          <button
-            onClick={() => setActiveTab('indices')}
-            className={`px-4 py-2 text-sm font-medium rounded-l-lg transition-colors ${
-              activeTab === 'indices' 
-                ? 'bg-primary text-primary-foreground' 
-                : 'bg-background hover:bg-muted'
-            }`}
-          >
-            Indices
-          </button>
-          <button
-            onClick={() => setActiveTab('newsflow')}
-            className={`px-4 py-2 text-sm font-medium rounded-r-lg transition-colors ${
-              activeTab === 'newsflow' 
-                ? 'bg-primary text-primary-foreground' 
-                : 'bg-background hover:bg-muted'
-            }`}
-          >
-            Newsflow
-          </button>
-        </div>
-      </div>
+    <>
+      {/* Header */}
+      <NewsletterHeader activeTab={activeTab} onTabChange={setActiveTab} />
 
       {/* Content Area */}
       <div className="p-6">
@@ -574,63 +820,48 @@ export default function NewsletterPage() {
               <div>
                 <h2 className="text-2xl font-semibold">Top 25 Revenue Index - Market Cap Weighted</h2>
                 <p className="text-muted-foreground">
-                  Top 25 tokens by market cap with quarterly revenue, rebalanced monthly
+                  Top revenue-generating tokens from our protocol dashboard, weighted by market cap (or equal weighted if insufficient data)
                 </p>
               </div>
               
-              {/* Time Period Selector and View Toggle */}
-              <div className="flex space-x-4">
-                {/* Time Period Selector */}
-                <div className="flex space-x-1 bg-muted p-1 rounded-lg">
-                  {(['W', 'M', 'Q', 'Y'] as TimePeriod[]).map((period) => (
-                    <button
-                      key={period}
-                      onClick={() => setTimePeriod(period)}
-                      className={`px-3 py-1 text-sm font-medium rounded-md transition-colors relative ${
-                        timePeriod === period 
-                          ? 'bg-background text-foreground shadow-sm' 
-                          : 'text-muted-foreground hover:text-foreground'
-                      }`}
-                    >
-                      {period}
-                      {/* Loading indicator for background loading */}
-                      {loadingPeriods.has(period) && period !== timePeriod && (
-                        <span className="absolute -top-1 -right-1 w-2 h-2 bg-blue-500 rounded-full animate-pulse"></span>
-                      )}
-                    </button>
-                  ))}
-                </div>
+              <div className="flex items-center space-x-4">
+                <PeriodSelector
+                  timePeriod={timePeriod}
+                  viewType={viewType}
+                  loadingPeriods={loadingPeriods}
+                  onTimePeriodChange={handleTimePeriodChange}
+                  onViewTypeChange={setViewType}
+                />
                 
-                {/* View Type Toggle */}
-                <div className="flex space-x-1 bg-muted p-1 rounded-lg">
-                  <button
-                    onClick={() => setViewType('chart')}
-                    className={`px-3 py-1 text-sm font-medium rounded-md transition-colors ${
-                      viewType === 'chart' 
-                        ? 'bg-background text-foreground shadow-sm' 
-                        : 'text-muted-foreground hover:text-foreground'
-                    }`}
+                {/* Load Chart Data Button */}
+                {!chartDataAvailable && (
+                  <Button 
+                    onClick={() => loadChartData(timePeriod)}
+                    disabled={chartDataLoading}
+                    className="bg-blue-600 hover:bg-blue-700"
                   >
-                    Chart View
-                  </button>
-                  <button
-                    onClick={() => setViewType('table')}
-                    className={`px-3 py-1 text-sm font-medium rounded-md transition-colors ${
-                      viewType === 'table' 
-                        ? 'bg-background text-foreground shadow-sm' 
-                        : 'text-muted-foreground hover:text-foreground'
-                    }`}
-                  >
-                    Table View
-                  </button>
-                </div>
+                    {chartDataLoading ? 'Loading Charts...' : 'Load Chart Data'}
+                  </Button>
+                )}
               </div>
             </div>
 
-            {/* Loading indicator */}
+            {/* Loading Progress for Chart Data */}
+            {showLoadingProgress && chartDataLoading && (
+              <div className="py-8">
+                <LoadingProgress
+                  steps={loadingSteps}
+                  currentStep={currentLoadingStep}
+                  overallProgress={getOverallProgress()}
+                  isVisible={showLoadingProgress}
+                />
+              </div>
+            )}
+
+            {/* Simple Loading indicator for basic data */}
             {loading && (
               <div className="text-center text-muted-foreground py-8">
-                Loading Top 25 Revenue Index - Market Cap Weighted ({timePeriod})...
+                Loading Revenue Data...
               </div>
             )}
 
@@ -641,214 +872,66 @@ export default function NewsletterPage() {
               </div>
             )}
 
+            {/* Chart Data Not Loaded Message */}
+            {!chartDataAvailable && !chartDataLoading && protocolRevenues.length > 0 && (viewType === 'chart' || viewType === 'asset') && (
+              <div className="text-center py-8 bg-muted/30 rounded-lg">
+                <p className="text-muted-foreground mb-4">
+                  Chart data not loaded. Click "Load Chart Data" to fetch market cap and price data for visualization.
+                </p>
+                <Button 
+                  onClick={() => loadChartData(timePeriod)}
+                  className="bg-blue-600 hover:bg-blue-700"
+                >
+                  Load Chart Data
+                </Button>
+              </div>
+            )}
+
             {/* Main Content Layout */}
-            {revenueIndexData.length > 0 && (
+            {chartDataAvailable && revenueIndexData.length > 0 && (
               <div>
                 {/* Chart View */}
                 {viewType === 'chart' && (
                   <div className="space-y-6">
-                    {/* Chart */}
-                    <Card>
-                      <CardContent className="p-6">
-                        <div className="h-96">
-                          <ResponsiveContainer width="100%" height="100%">
-                            <LineChart data={revenueIndexData}>
-                              <CartesianGrid strokeDasharray="3 3" />
-                              <XAxis 
-                                dataKey="date" 
-                                tick={{ fontSize: 12 }}
-                                tickFormatter={(value) => {
-                                  const date = new Date(value)
-                                  return date.toLocaleDateString()
-                                }}
-                              />
-                              <YAxis 
-                                tick={{ fontSize: 12 }}
-                                tickFormatter={(value) => `${value.toFixed(1)}%`}
-                              />
-                              <Tooltip 
-                                formatter={(value: number) => [`${value.toFixed(2)}%`, 'Index Change']}
-                                labelFormatter={(label) => {
-                                  const date = new Date(label)
-                                  return date.toLocaleDateString()
-                                }}
-                              />
-                              <Legend />
-                              <Line 
-                                type="monotone" 
-                                dataKey="index_change" 
-                                stroke="#2563eb" 
-                                strokeWidth={2}
-                                name="Top 25 Revenue Index - Market Cap Weighted"
-                                dot={false}
-                              />
-                            </LineChart>
-                          </ResponsiveContainer>
-                        </div>
-                      </CardContent>
-                    </Card>
-
-                    {/* Stats Below Chart */}
-                    {stats && (
-                      <div className="grid grid-cols-5 gap-6">
-                        <div className="text-center">
-                          <div className="text-sm text-muted-foreground">Period Change</div>
-                          <div className={`text-2xl font-bold ${stats.currentChange >= 0 ? 'text-green-600' : 'text-red-600'}`}>
-                            {stats.currentChange >= 0 ? '+' : ''}{stats.currentChange.toFixed(2)}%
-                          </div>
-                        </div>
-                        <div className="text-center">
-                          <div className="text-sm text-muted-foreground">Total Revenue (90d)</div>
-                          <div className="text-lg font-semibold">${(stats.totalRevenue || 0).toLocaleString()}</div>
-                        </div>
-                        <div className="text-center">
-                          <div className="text-sm text-muted-foreground">Top 5 Protocols</div>
-                          <div className="text-xs space-y-1">
-                            {stats.topProtocols?.slice(0, 5).map((protocol, i) => (
-                              <div key={i}>{protocol}</div>
-                            ))}
-                          </div>
-                        </div>
-                        <div className="text-center">
-                          <div className="text-sm text-muted-foreground">Rebalance</div>
-                          <div className="text-lg font-semibold">Monthly</div>
-                        </div>
-                        <div className="text-center">
-                          <div className="text-sm text-muted-foreground">Protocols</div>
-                          <div className="text-lg font-semibold">25</div>
-                        </div>
-                      </div>
-                    )}
+                    <RevenueChart data={revenueIndexData} />
+                    <RevenueStats data={revenueIndexData} />
                   </div>
                 )}
 
-                {/* Table View */}
-                {viewType === 'table' && (
-                  <div className="grid grid-cols-12 gap-6">
-                    {/* Protocol Table */}
-                    <div className="col-span-8">
-                      {revenueIndexData.length > 0 && (
-                        <Card>
-                          <CardHeader>
-                            <CardTitle className="text-lg">Top 25 Protocols</CardTitle>
-                            <CardDescription>
-                              Quarterly Revenue (90d) - Market Cap Weighted | 
-                              {protocolRevenues.filter(p => p.mapping_status === 'success').length}/25 successful mappings
-                            </CardDescription>
-                          </CardHeader>
-                          <CardContent className="p-0">
-                            <div className="max-h-[600px] overflow-y-auto">
-                              <table className="w-full text-sm">
-                                <thead className="sticky top-0 bg-muted/50">
-                                  <tr>
-                                    <th className="text-left p-2 font-medium">#</th>
-                                    <th className="text-left p-2 font-medium">Protocol</th>
-                                    <th className="text-left p-2 font-medium">Token</th>
-                                    <th className="text-right p-2 font-medium">Revenue</th>
-                                    <th className="text-right p-2 font-medium">Market Cap</th>
-                                    <th className="text-right p-2 font-medium">MC %</th>
-                                    <th className="text-center p-2 font-medium">Status</th>
-                                  </tr>
-                                </thead>
-                                <tbody>
-                                  {protocolRevenues.map((protocol, index) => (
-                                    <tr key={index} className="border-b hover:bg-muted/30">
-                                      <td className="p-2 text-muted-foreground">{index + 1}</td>
-                                      <td className="p-2 font-medium">{protocol.name}</td>
-                                      <td className="p-2">
-                                        <div className="flex items-center space-x-2">
-                                          <span className="text-muted-foreground">
-                                            {protocol.token || 'N/A'}
-                                          </span>
-                                          {protocol.mapping_confidence !== undefined && (
-                                            <span className={`text-xs ${getConfidenceColor(protocol.mapping_confidence)}`}>
-                                              {(protocol.mapping_confidence * 100).toFixed(0)}%
-                                            </span>
-                                          )}
-                                        </div>
-                                      </td>
-                                      <td className="p-2 text-right">${protocol.quarterly_revenue.toLocaleString()}</td>
-                                      <td className="p-2 text-right">
-                                        {protocol.market_cap > 0 ? `$${protocol.market_cap.toLocaleString()}` : 'N/A'}
-                                      </td>
-                                      <td className="p-2 text-right">
-                                        {protocol.weight > 0 ? `${(protocol.weight * 100).toFixed(2)}%` : 'N/A'}
-                                      </td>
-                                      <td className="p-2 text-center">
-                                        <div className="flex items-center justify-center space-x-1">
-                                          <Badge 
-                                            variant="outline" 
-                                            className={`text-xs ${getStatusBadgeClass(protocol.mapping_status || 'failed')}`}
-                                          >
-                                            {protocol.mapping_status}
-                                          </Badge>
-                                          {protocol.match_method && (
-                                            <span className="text-xs text-muted-foreground" title={`Match method: ${protocol.match_method}`}>
-                                              {protocol.match_method.slice(0, 3)}
-                                            </span>
-                                          )}
-                                        </div>
-                                      </td>
-                                    </tr>
-                                  ))}
-                                </tbody>
-                              </table>
-                            </div>
-                          </CardContent>
-                        </Card>
-                      )}
-                    </div>
-                    
-                    {/* Exclusion List */}
-                    <div className="col-span-4">
-                      {revenueIndexData.length > 0 && (
-                        <Card>
-                          <CardHeader>
-                            <CardTitle className="text-lg">Excluded Protocols</CardTitle>
-                            <CardDescription>Protocols excluded from index</CardDescription>
-                          </CardHeader>
-                          <CardContent>
-                            <div className="space-y-2">
-                              {excludedProtocols.map((protocol, index) => (
-                                <div key={index} className="flex items-center justify-between p-2 bg-muted/30 rounded">
-                                  <span className="font-medium">{protocol}</span>
-                                  <div className="flex items-center space-x-2">
-                                    <Badge variant="outline" className="text-xs">
-                                      {protocol === 'Tether' || protocol === 'Circle' ? 'Stablecoin' : 'Wallet/Infrastructure'}
-                                    </Badge>
-                                  </div>
-                                </div>
-                              ))}
-                            </div>
-                            <div className="mt-3 text-xs text-muted-foreground">
-                              Excluded protocols are filtered out before ranking. Index focuses on revenue-generating protocols with tradeable tokens, excluding wallets, infrastructure, and stablecoins.
-                            </div>
-                          </CardContent>
-                        </Card>
-                      )}
-                    </div>
-                  </div>
+                {/* Asset View */}
+                {viewType === 'asset' && (
+                  <AssetView protocols={protocolRevenues} timePeriod={timePeriod} />
                 )}
               </div>
             )}
           </div>
         )}
 
-        {activeTab === 'newsflow' && (
+        {activeTab === 'dashboards' && (
           <div className="space-y-6">
-            <h2 className="text-2xl font-semibold">Newsflow</h2>
-            <Card>
-              <CardContent className="p-12">
-                <div className="text-center">
-                  <p className="text-lg text-muted-foreground">
-                    Coming soon...
-                  </p>
-                </div>
-              </CardContent>
-            </Card>
+            {/* Simple Loading indicator for basic data */}
+            {loading && (
+              <div className="text-center text-muted-foreground py-8">
+                Loading Dashboard Data...
+              </div>
+            )}
+
+            {/* Error Display */}
+            {error && (
+              <div className="text-center text-red-600 text-sm py-8">
+                {error}
+              </div>
+            )}
+
+            {/* Dashboard Content - Shows immediately with basic data */}
+            {protocolRevenues.length > 0 && (
+              <ProtocolTable protocols={protocolRevenues} />
+            )}
           </div>
         )}
+
+        {activeTab === 'newsflow' && <NewsflowPlaceholder />}
       </div>
-    </div>
+    </>
   )
 }

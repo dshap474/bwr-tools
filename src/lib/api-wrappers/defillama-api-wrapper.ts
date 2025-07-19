@@ -58,6 +58,23 @@ interface VolumeData {
   [protocol: string]: number | string | undefined;
 }
 
+interface DerivativesData {
+  name: string;
+  totalVolume30d: number;
+  totalVolume7d: number;
+  dailyVolume: number;
+  change_1d?: number;
+  change_7d?: number;
+  change_30d?: number;
+  dominance?: number;
+}
+
+interface DerivativesVolumeData {
+  timestamp: string;
+  total_volume?: number;
+  [protocol: string]: number | string | undefined;
+}
+
 export class DeFiLlamaAPI {
   private baseUrl: string;
   private coinsBaseUrl: string;
@@ -111,7 +128,15 @@ export class DeFiLlamaAPI {
       return await response.json();
     } catch (error) {
       console.error(`Error fetching data from ${url}:`, error);
-      throw error;
+      
+      // Provide more specific error messages
+      if (error instanceof TypeError && error.message.includes('Failed to fetch')) {
+        throw new Error(`Network error: Unable to connect to DeFiLlama API. Please check your internet connection.`);
+      } else if (error instanceof Error) {
+        throw new Error(`DeFiLlama API error: ${error.message}`);
+      } else {
+        throw new Error(`Unknown error occurred while fetching data from DeFiLlama API`);
+      }
     }
   }
 
@@ -512,6 +537,115 @@ export class DeFiLlamaAPI {
         }));
     } catch (error) {
       console.error(`Error fetching DEXs overview for ${chain}:`, error);
+      return [];
+    }
+  }
+
+  // Derivatives/Perpetuals Methods
+  async getDerivativesOverview(dataType: string = "dailyVolume"): Promise<DerivativesData[]> {
+    try {
+      const params = {
+        excludeTotalDataChart: "true",
+        excludeTotalDataChartBreakdown: "true",
+        dataType,
+      };
+
+      const data = await this.fetchData<{ protocols: any[] }>(`${this.baseUrl}/overview/derivatives`, params);
+      
+      if (!data.protocols) return [];
+
+      const totalVolume = data.protocols.reduce((sum, protocol) => sum + (protocol.total30d || 0), 0);
+
+      return data.protocols
+        .sort((a, b) => (b.total30d || 0) - (a.total30d || 0))
+        .map((protocol) => ({
+          name: protocol.name,
+          totalVolume30d: protocol.total30d || 0,
+          totalVolume7d: protocol.total7d || 0,
+          dailyVolume: protocol.total1d || 0,
+          change_1d: protocol.change_1d ? Number(protocol.change_1d) : undefined,
+          change_7d: protocol.change_7d ? Number(protocol.change_7d) : undefined,
+          change_30d: protocol.change_30d ? Number(protocol.change_30d) : undefined,
+          dominance: totalVolume > 0 ? ((protocol.total30d || 0) / totalVolume) * 100 : 0,
+        }));
+    } catch (error) {
+      console.error('Error fetching derivatives overview:', error);
+      return [];
+    }
+  }
+
+  async getTotalDerivativesVolume(dataType: string = "dailyVolume"): Promise<DerivativesVolumeData[]> {
+    try {
+      const params = {
+        excludeTotalDataChart: "false",
+        excludeTotalDataChartBreakdown: "false",
+        dataType,
+      };
+
+      const data = await this.fetchData<any>(`${this.baseUrl}/overview/derivatives`, params);
+      
+      const result: DerivativesVolumeData[] = [];
+
+      // Process totalDataChart
+      if (data.totalDataChart) {
+        data.totalDataChart.forEach((point: any, index: number) => {
+          result[index] = {
+            timestamp: new Date(point[0] * 1000).toISOString(),
+            total_volume: point[1],
+          };
+        });
+      }
+
+      // Process breakdown data
+      if (data.totalDataChartBreakdown) {
+        data.totalDataChartBreakdown.forEach((point: any, index: number) => {
+          if (!result[index]) {
+            result[index] = {
+              timestamp: new Date(point[0] * 1000).toISOString(),
+            };
+          }
+          
+          Object.entries(point[1]).forEach(([protocol, volume]: [string, any]) => {
+            result[index][protocol] = Number(volume) || 0;
+          });
+        });
+      }
+
+      return result.sort((a, b) => new Date(a.timestamp).getTime() - new Date(b.timestamp).getTime());
+    } catch (error) {
+      console.error('Error fetching total derivatives volume:', error);
+      return [];
+    }
+  }
+
+  async getChainDerivativesOverview(chain: string, dataType: string = "dailyVolume"): Promise<DerivativesData[]> {
+    try {
+      const params = {
+        excludeTotalDataChart: "true",
+        excludeTotalDataChartBreakdown: "true",
+        dataType,
+      };
+
+      const data = await this.fetchData<{ protocols: any[] }>(`${this.baseUrl}/overview/derivatives/${chain}`, params);
+      
+      if (!data.protocols) return [];
+
+      const totalVolume = data.protocols.reduce((sum, protocol) => sum + (protocol.total30d || 0), 0);
+
+      return data.protocols
+        .sort((a, b) => (b.total30d || 0) - (a.total30d || 0))
+        .map((protocol) => ({
+          name: protocol.name,
+          totalVolume30d: protocol.total30d || 0,
+          totalVolume7d: protocol.total7d || 0,
+          dailyVolume: protocol.total1d || 0,
+          change_1d: protocol.change_1d ? Number(protocol.change_1d) : undefined,
+          change_7d: protocol.change_7d ? Number(protocol.change_7d) : undefined,
+          change_30d: protocol.change_30d ? Number(protocol.change_30d) : undefined,
+          dominance: totalVolume > 0 ? ((protocol.total30d || 0) / totalVolume) * 100 : 0,
+        }));
+    } catch (error) {
+      console.error(`Error fetching derivatives overview for ${chain}:`, error);
       return [];
     }
   }
